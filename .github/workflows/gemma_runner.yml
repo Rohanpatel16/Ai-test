@@ -12,27 +12,25 @@ on:
       model:
         description: 'Model variant'
         required: false
-        default: 'gemma4:e2b-q4_K_M'
+        default: 'gemma4:e2b'
 
 jobs:
   inference:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Restore Cached Model (~4 seconds for 1.4 GB)
+      # 1. Restore Cached Model (~3-5 seconds if cached)
       - name: Cache Ollama Models
         id: cache-ollama
         uses: actions/cache@v4
         with:
           path: ~/.ollama/models
-          key: ollama-models-${{ github.event.client_payload.model || github.event.inputs.model || 'gemma4:e2b-q4_K_M' }}
+          key: ollama-models-${{ github.event.client_payload.model || github.event.inputs.model || 'gemma4:e2b' }}
 
-      # 2. Fast Binary Install (Bypasses slow systemd setup - takes ~2 seconds)
+      # 2. Fast Binary Install (Direct unpack into /usr - takes ~2 seconds)
       - name: Fast Install Ollama Binary
         run: |
-          curl -sL https://ollama.com/download/ollama-linux-amd64.tgz -o /tmp/ollama.tgz
-          sudo tar -C /usr -xzf /tmp/ollama.tgz
-          rm /tmp/ollama.tgz
+          curl -fsSL https://ollama.com/download/ollama-linux-amd64.tar.zst | sudo tar --zstd -x -C /usr
 
       # 3. Start Service
       - name: Start Ollama Service
@@ -41,14 +39,16 @@ jobs:
           until curl -s http://localhost:11434/api/tags > /dev/null; do
             sleep 0.5
           done
+          echo "Ollama service started."
 
-      # 4. Fast CPU Inference
+      # 4. Run Model Inference
       - name: Run Inference
         id: inference
         run: |
           PROMPT="${{ github.event.client_payload.prompt || github.event.inputs.prompt }}"
-          MODEL="${{ github.event.client_payload.model || github.event.inputs.model || 'gemma4:e2b-q4_K_M' }}"
+          MODEL="${{ github.event.client_payload.model || github.event.inputs.model || 'gemma4:e2b' }}"
 
+          echo "Running $MODEL with prompt: $PROMPT"
           OUTPUT=$(ollama run "$MODEL" "$PROMPT")
 
           echo "## 🤖 Gemma AI Response" >> $GITHUB_STEP_SUMMARY
@@ -59,3 +59,11 @@ jobs:
             echo "$OUTPUT"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
+
+      # 5. Optional Callback Webhook
+      - name: Send Callback
+        if: github.event.client_payload.callback_url != ''
+        run: |
+          curl -X POST "${{ github.event.client_payload.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"response\": $(jq -R -s . <<< "${{ steps.inference.outputs.ai_response }}")}"
