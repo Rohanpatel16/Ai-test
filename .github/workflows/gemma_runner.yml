@@ -1,82 +1,61 @@
-name: Gemma 4 AI Runner
+name: Gemma 4 AI Runner (Fast)
 
 on:
-  # 1. Trigger via REST API
   repository_dispatch:
     types: [gemma-query]
-
-  # 2. Trigger manually in GitHub UI
   workflow_dispatch:
     inputs:
       prompt:
-        description: 'Prompt for Gemma'
+        description: 'Prompt'
         required: true
         default: 'Explain why the sky is blue in two simple sentences.'
       model:
-        description: 'Model variant to run'
+        description: 'Model variant'
         required: false
-        default: 'gemma4:e2b'
+        default: 'gemma4:e2b-q4_K_M'
 
 jobs:
   inference:
     runs-on: ubuntu-latest
 
     steps:
+      # 1. Restore Cached Model (~4 seconds for 1.4 GB)
       - name: Cache Ollama Models
         id: cache-ollama
         uses: actions/cache@v4
         with:
           path: ~/.ollama/models
-          key: ollama-models-${{ github.event.client_payload.model || github.event.inputs.model || 'gemma4:e2b' }}
+          key: ollama-models-${{ github.event.client_payload.model || github.event.inputs.model || 'gemma4:e2b-q4_K_M' }}
 
-      - name: Install Ollama
+      # 2. Fast Binary Install (Bypasses slow systemd setup - takes ~2 seconds)
+      - name: Fast Install Ollama Binary
         run: |
-          curl -fsSL https://ollama.com/install.sh | sh
+          curl -sL https://ollama.com/download/ollama-linux-amd64.tgz -o /tmp/ollama.tgz
+          sudo tar -C /usr -xzf /tmp/ollama.tgz
+          rm /tmp/ollama.tgz
 
+      # 3. Start Service
       - name: Start Ollama Service
         run: |
           ollama serve > /dev/null 2>&1 &
           until curl -s http://localhost:11434/api/tags > /dev/null; do
-            sleep 1
+            sleep 0.5
           done
-          echo "Ollama is running."
 
-      - name: Run Model Inference
+      # 4. Fast CPU Inference
+      - name: Run Inference
         id: inference
         run: |
           PROMPT="${{ github.event.client_payload.prompt || github.event.inputs.prompt }}"
-          MODEL="${{ github.event.client_payload.model || github.event.inputs.model || 'gemma4:e2b' }}"
+          MODEL="${{ github.event.client_payload.model || github.event.inputs.model || 'gemma4:e2b-q4_K_M' }}"
 
-          echo "Selected Model: $MODEL"
-          echo "Prompt: $PROMPT"
-
-          # Run inference (uses cache if available, otherwise downloads automatically)
           OUTPUT=$(ollama run "$MODEL" "$PROMPT")
 
-          # Write to GitHub Actions UI Summary
           echo "## 🤖 Gemma AI Response" >> $GITHUB_STEP_SUMMARY
-          echo "**Model:** \`$MODEL\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Prompt:** $PROMPT" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
           echo "$OUTPUT" >> $GITHUB_STEP_SUMMARY
 
-          # Export output to step variable for callback step
           {
             echo "ai_response<<EOF"
             echo "$OUTPUT"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Send Callback Webhook
-        if: github.event.client_payload.callback_url != ''
-        run: |
-          CALLBACK_URL="${{ github.event.client_payload.callback_url }}"
-          PAYLOAD=$(jq -n \
-            --arg prompt "${{ github.event.client_payload.prompt }}" \
-            --arg response "${{ steps.inference.outputs.ai_response }}" \
-            --arg model "${{ github.event.client_payload.model || 'gemma4:e2b' }}" \
-            '{status: "success", model: $model, prompt: $prompt, response: $response}')
-
-          curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
