@@ -1,11 +1,8 @@
 name: Qwen 2.5 AI Runner
 
 on:
-  # 1. Trigger via REST API
   repository_dispatch:
     types: [ai-query]
-
-  # 2. Trigger manually via GitHub UI
   workflow_dispatch:
     inputs:
       prompt:
@@ -22,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Restore the new lightweight ~980 MB cache (~3-4 seconds)
+      # 1. Restore the lightweight cache (~3 seconds)
       - name: Cache Ollama Models
         id: cache-ollama
         uses: actions/cache@v4
@@ -46,8 +43,8 @@ jobs:
           done
           echo "Ollama is ready!"
 
-      # 4. Stream response live to terminal & write to summary
-      - name: Run Inference (Live Streaming)
+      # 4. Clean REST API Inference (No terminal artifacts, no EOF errors)
+      - name: Run Inference
         id: inference
         run: |
           PROMPT="${{ github.event.client_payload.prompt || github.event.inputs.prompt }}"
@@ -55,30 +52,39 @@ jobs:
 
           echo "Selected Model: $MODEL"
           echo "Prompt: $PROMPT"
-          echo ""
-          echo "==================== [ LIVE RESPONSE ] ===================="
 
-          # Stream live tokens to console & save to response.txt
-          ollama run "$MODEL" "$PROMPT" 2>&1 | tee response.txt
+          # Ensure model is available
+          ollama pull "$MODEL"
+
+          # Query Ollama via REST API
+          RAW_RESPONSE=$(curl -s http://localhost:11434/api/generate \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg m "$MODEL" --arg p "$PROMPT" '{model: $m, prompt: $p, stream: false}')")
+
+          # Extract clean response text
+          RESPONSE=$(echo "$RAW_RESPONSE" | jq -r '.response')
 
           echo ""
-          echo "==========================================================="
+          echo "==================== [ RESPONSE ] ===================="
+          echo "$RESPONSE"
+          echo "======================================================"
 
           # Write clean response to GitHub UI Summary tab
           echo "## 🤖 Qwen 2.5 Response" >> $GITHUB_STEP_SUMMARY
           echo "**Model:** \`$MODEL\`" >> $GITHUB_STEP_SUMMARY
           echo "**Prompt:** $PROMPT" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
-          cat response.txt >> $GITHUB_STEP_SUMMARY
+          echo "$RESPONSE" >> $GITHUB_STEP_SUMMARY
 
-          # Set output for subsequent steps
+          # Safe GitHub Output Delimiter
+          DELIMITER="EOF_$(date +%s%N)"
           {
-            echo "ai_response<<EOF"
-            cat response.txt
-            echo "EOF"
+            echo "ai_response<<$DELIMITER"
+            echo "$RESPONSE"
+            echo "$DELIMITER"
           } >> "$GITHUB_OUTPUT"
 
-      # 5. Optional Webhook Callback
+      # 5. Optional Callback Webhook
       - name: Send Callback
         if: github.event.client_payload.callback_url != ''
         run: |
