@@ -1,69 +1,88 @@
-name: Gemma 4 AI Runner (Fast)
+name: Qwen 2.5 AI Runner
 
 on:
+  # 1. Trigger via REST API
   repository_dispatch:
-    types: [gemma-query]
+    types: [ai-query]
+
+  # 2. Trigger manually via GitHub UI
   workflow_dispatch:
     inputs:
       prompt:
         description: 'Prompt'
         required: true
-        default: 'Explain why the sky is blue in two simple sentences.'
+        default: 'what is 1+2+3+4.... Till 100?'
       model:
         description: 'Model variant'
         required: false
-        default: 'gemma4:e2b'
+        default: 'qwen2.5:1.5b'
 
 jobs:
   inference:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Restore Cached Model (~3-5 seconds if cached)
+      # 1. Restore the new lightweight ~980 MB cache (~3-4 seconds)
       - name: Cache Ollama Models
         id: cache-ollama
         uses: actions/cache@v4
         with:
           path: ~/.ollama/models
-          key: ollama-models-${{ github.event.client_payload.model || github.event.inputs.model || 'gemma4:e2b' }}
+          key: ollama-cache-${{ github.event.client_payload.model || github.event.inputs.model || 'qwen2.5:1.5b' }}
 
-      # 2. Fast Binary Install (Direct unpack into /usr - takes ~2 seconds)
+      # 2. Fast binary install (~2 seconds)
       - name: Fast Install Ollama Binary
         run: |
           curl -fsSL https://ollama.com/download/ollama-linux-amd64.tar.zst | sudo tar --zstd -x -C /usr
 
-      # 3. Start Service
+      # 3. Start Ollama Service with CPU Thread Tuning
       - name: Start Ollama Service
         run: |
+          export OMP_NUM_THREADS=2
+          export OLLAMA_NUM_PARALLEL=1
           ollama serve > /dev/null 2>&1 &
           until curl -s http://localhost:11434/api/tags > /dev/null; do
-            sleep 0.5
+            sleep 0.3
           done
-          echo "Ollama service started."
+          echo "Ollama is ready!"
 
-      # 4. Run Model Inference
-      - name: Run Inference
+      # 4. Stream response live to terminal & write to summary
+      - name: Run Inference (Live Streaming)
         id: inference
         run: |
           PROMPT="${{ github.event.client_payload.prompt || github.event.inputs.prompt }}"
-          MODEL="${{ github.event.client_payload.model || github.event.inputs.model || 'gemma4:e2b' }}"
+          MODEL="${{ github.event.client_payload.model || github.event.inputs.model || 'qwen2.5:1.5b' }}"
 
-          echo "Running $MODEL with prompt: $PROMPT"
-          OUTPUT=$(ollama run "$MODEL" "$PROMPT")
+          echo "Selected Model: $MODEL"
+          echo "Prompt: $PROMPT"
+          echo ""
+          echo "==================== [ LIVE RESPONSE ] ===================="
 
-          echo "## 🤖 Gemma AI Response" >> $GITHUB_STEP_SUMMARY
-          echo "$OUTPUT" >> $GITHUB_STEP_SUMMARY
+          # Stream live tokens to console & save to response.txt
+          ollama run "$MODEL" "$PROMPT" 2>&1 | tee response.txt
 
+          echo ""
+          echo "==========================================================="
+
+          # Write clean response to GitHub UI Summary tab
+          echo "## 🤖 Qwen 2.5 Response" >> $GITHUB_STEP_SUMMARY
+          echo "**Model:** \`$MODEL\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Prompt:** $PROMPT" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          cat response.txt >> $GITHUB_STEP_SUMMARY
+
+          # Set output for subsequent steps
           {
             echo "ai_response<<EOF"
-            echo "$OUTPUT"
+            cat response.txt
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      # 5. Optional Callback Webhook
+      # 5. Optional Webhook Callback
       - name: Send Callback
         if: github.event.client_payload.callback_url != ''
         run: |
-          curl -X POST "${{ github.event.client_payload.callback_url }}" \
+          CALLBACK_URL="${{ github.event.client_payload.callback_url }}"
+          curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -d "{\"response\": $(jq -R -s . <<< "${{ steps.inference.outputs.ai_response }}")}"
